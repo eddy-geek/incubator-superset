@@ -11,11 +11,14 @@ import unittest
 from mock import Mock, patch
 
 from superset import db, sm, security
-from superset.connectors.druid.models import DruidCluster, DruidDatasource
-from superset.connectors.druid.models import PyDruid
+from superset.connectors.druid.models import DruidMetric, DruidCluster, DruidDatasource
+from superset.connectors.druid.models import PyDruid, Quantile, Postaggregator
 
 from .base_tests import SupersetTestCase
 
+class PickableMock(Mock):
+    def __reduce__(self):
+        return (Mock, ())
 
 SEGMENT_METADATA = [{
   "id": "some_id",
@@ -38,7 +41,7 @@ SEGMENT_METADATA = [{
     "metric1": {
         "type": "longSum",
         "name": "metric1",
-        "fieldName": "metric1"}
+        "fieldName": "metric1"},
   },
   "size": 300000,
   "numRows": 5000000
@@ -98,8 +101,8 @@ class DruidTests(SupersetTestCase):
             metadata_last_refreshed=datetime.now())
 
         db.session.add(cluster)
-        cluster.get_datasources = Mock(return_value=['test_datasource'])
-        cluster.get_druid_version = Mock(return_value='0.9.1')
+        cluster.get_datasources = PickableMock(return_value=['test_datasource'])
+        cluster.get_druid_version = PickableMock(return_value='0.9.1')
         cluster.refresh_datasources()
         cluster.refresh_datasources(merge_flag=True)
         datasource_id = cluster.datasources[0].id
@@ -303,11 +306,14 @@ class DruidTests(SupersetTestCase):
             metadata_last_refreshed=datetime.now())
 
         db.session.add(cluster)
-        cluster.get_datasources = Mock(return_value=['test_datasource'])
-        cluster.get_druid_version = Mock(return_value='0.9.1')
+        cluster.get_datasources = PickableMock(return_value=['test_datasource'])
+        cluster.get_druid_version = PickableMock(return_value='0.9.1')
 
         cluster.refresh_datasources()
         datasource_id = cluster.datasources[0].id
+        cluster.datasources[0].merge_flag = True
+        metadata = cluster.datasources[0].latest_metadata()
+        self.assertEqual(len(metadata), 4)
         db.session.commit()
 
         view_menu_name = cluster.datasources[0].get_perm()
@@ -318,6 +324,77 @@ class DruidTests(SupersetTestCase):
             permission=permission, view_menu=view_menu).first()
         assert pv is not None
 
+    def test_metrics_and_post_aggs(self):
+        """
+        Test generation of metrics and post-aggregations from an initial list
+        of superset metrics (which may include the results of either). This
+        primarily tests that specifying a post-aggregator metric will also
+        require the raw aggregation of the associated druid metric column.
+        """
+        metrics_dict = {
+            'unused_count': DruidMetric(
+                metric_name='unused_count',
+                verbose_name='COUNT(*)',
+                metric_type='count',
+                json=json.dumps({'type': 'count', 'name': 'unused_count'})),
+            'some_sum': DruidMetric(
+                metric_name='some_sum',
+                verbose_name='SUM(*)',
+                metric_type='sum',
+                json=json.dumps({'type': 'sum', 'name': 'sum'})),
+            'a_histogram': DruidMetric(
+                metric_name='a_histogram',
+                verbose_name='APPROXIMATE_HISTOGRAM(*)',
+                metric_type='approxHistogramFold',
+                json=json.dumps({'type': 'approxHistogramFold', 'name': 'a_histogram'})),
+            'aCustomMetric': DruidMetric(
+                metric_name='aCustomMetric',
+                verbose_name='MY_AWESOME_METRIC(*)',
+                metric_type='aCustomType',
+                json=json.dumps({'type': 'customMetric', 'name': 'aCustomMetric'})),
+            'quantile_p95': DruidMetric(
+                metric_name='quantile_p95',
+                verbose_name='P95(*)',
+                metric_type='postagg',
+                json=json.dumps({
+                    'type': 'quantile',
+                    'probability': 0.95,
+                    'name': 'p95',
+                    'fieldName': 'a_histogram'})),
+            'aCustomPostAgg': DruidMetric(
+                metric_name='aCustomPostAgg',
+                verbose_name='CUSTOM_POST_AGG(*)',
+                metric_type='postagg',
+                json=json.dumps({
+                    'type': 'customPostAgg',
+                    'name': 'aCustomPostAgg',
+                    'field': {
+                        'type': 'fieldAccess',
+                        'fieldName': 'aCustomMetric'}})),
+        }
+
+        metrics = ['some_sum']
+        all_metrics, post_aggs = DruidDatasource._metrics_and_post_aggs(
+            metrics, metrics_dict)
+
+        assert all_metrics == ['some_sum']
+        assert post_aggs == {}
+
+        metrics = ['quantile_p95']
+        all_metrics, post_aggs = DruidDatasource._metrics_and_post_aggs(
+            metrics, metrics_dict)
+
+        result_postaggs = set(['quantile_p95'])
+        assert all_metrics == ['a_histogram']
+        assert set(post_aggs.keys()) == result_postaggs
+
+        metrics = ['aCustomPostAgg']
+        all_metrics, post_aggs = DruidDatasource._metrics_and_post_aggs(
+            metrics, metrics_dict)
+
+        result_postaggs = set(['aCustomPostAgg'])
+        assert all_metrics == ['aCustomMetric']
+        assert set(post_aggs.keys()) == result_postaggs
 
 
 if __name__ == '__main__':

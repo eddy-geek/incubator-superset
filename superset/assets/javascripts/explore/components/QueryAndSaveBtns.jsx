@@ -41,7 +41,7 @@ export default function QueryAndSaveBtns(
       bsStyle={qryButtonStyle}
       disabled={!!errorMessage}
     >
-      <i className="fa fa-bolt" /> Query
+      <i className="fa fa-bolt" /> Run Query
     </Button>
   );
 
@@ -56,7 +56,7 @@ export default function QueryAndSaveBtns(
           disabled={saveButtonDisabled}
           onClick={onSave}
         >
-          <i className="fa fa-plus-circle" /> Save as
+          <i className="fa fa-plus-circle" /> Save
         </Button>
       </ButtonGroup>
       {errorMessage &&

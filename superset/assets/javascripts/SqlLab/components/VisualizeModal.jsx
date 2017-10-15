@@ -1,4 +1,5 @@
 /* global notify */
+import moment from 'moment';
 import React from 'react';
 import PropTypes from 'prop-types';
 import { bindActionCreators } from 'redux';
@@ -10,13 +11,20 @@ import { Table } from 'reactable';
 import shortid from 'shortid';
 import { getExploreUrl } from '../../explore/exploreUtils';
 import * as actions from '../actions';
+import { VISUALIZE_VALIDATION_ERRORS } from '../constants';
+import visTypes from '../../explore/stores/visTypes';
+import { t } from '../../locales';
 
-const CHART_TYPES = [
-  { value: 'dist_bar', label: 'Distribution - Bar Chart', requiresTime: false },
-  { value: 'pie', label: 'Pie Chart', requiresTime: false },
-  { value: 'line', label: 'Time Series - Line Chart', requiresTime: true },
-  { value: 'bar', label: 'Time Series - Bar Chart', requiresTime: true },
-];
+const CHART_TYPES = Object.keys(visTypes)
+  .filter(typeName => !!visTypes[typeName].showOnExplore)
+  .map((typeName) => {
+    const vis = visTypes[typeName];
+    return {
+      value: typeName,
+      label: vis.label,
+      requiresTime: !!vis.requiresTime,
+    };
+  });
 
 const propTypes = {
   actions: PropTypes.object.isRequired,
@@ -25,6 +33,7 @@ const propTypes = {
   show: PropTypes.bool,
   datasource: PropTypes.string,
   errorMessage: PropTypes.string,
+  timeout: PropTypes.number,
 };
 const defaultProps = {
   show: false,
@@ -38,28 +47,26 @@ class VisualizeModal extends React.PureComponent {
     this.state = {
       chartType: CHART_TYPES[0],
       datasourceName: this.datasourceName(),
-      columns: {},
+      columns: this.getColumnFromProps(),
       hints: [],
     };
   }
   componentDidMount() {
     this.validate();
   }
-  componentWillReceiveProps(nextProps) {
-    this.setStateFromProps(nextProps);
-  }
-  setStateFromProps(props) {
-    if (
+  getColumnFromProps() {
+    const props = this.props;
+    if (!props ||
         !props.query ||
         !props.query.results ||
         !props.query.results.columns) {
-      return;
+      return {};
     }
     const columns = {};
     props.query.results.columns.forEach((col) => {
       columns[col.name] = col;
     });
-    this.setState({ columns });
+    return columns;
   }
   datasourceName() {
     const { query } = this.props;
@@ -80,14 +87,14 @@ class VisualizeModal extends React.PureComponent {
       if (!re.test(colName)) {
         hints.push(
           <div>
-            "{colName}" is not right as a column name, please alias it
-            (as in SELECT count(*) <strong>AS my_alias</strong>) using only
-            alphanumeric characters and underscores
+            {t('%s is not right as a column name, please alias it ' +
+            '(as in SELECT count(*) ', colName)} <strong>{t('AS my_alias')}</strong>) {t('using only ' +
+            'alphanumeric characters and underscores')}
           </div>);
       }
     });
     if (this.state.chartType === null) {
-      hints.push('Pick a chart type!');
+      hints.push(VISUALIZE_VALIDATION_ERRORS.REQUIRE_CHART_TYPE);
     } else if (this.state.chartType.requiresTime) {
       let hasTime = false;
       for (const colName in cols) {
@@ -97,9 +104,7 @@ class VisualizeModal extends React.PureComponent {
         }
       }
       if (!hasTime) {
-        hints.push(
-          'To use this chart type you need at least one column ' +
-          'flagged as a date');
+        hints.push(VISUALIZE_VALIDATION_ERRORS.REQUIRE_TIME);
       }
     }
     this.setState({ hints });
@@ -118,19 +123,36 @@ class VisualizeModal extends React.PureComponent {
     }
     return columns;
   }
-  visualize() {
-    const vizOptions = {
+  buildVizOptions() {
+    return {
       chartType: this.state.chartType.value,
       datasourceName: this.state.datasourceName,
       columns: this.state.columns,
       sql: this.props.query.sql,
       dbId: this.props.query.dbId,
     };
-
-    this.props.actions.createDatasource(vizOptions, this)
+  }
+  buildVisualizeAdvise() {
+    let advise;
+    const timeout = this.props.timeout;
+    const queryDuration = moment.duration(this.props.query.endDttm - this.props.query.startDttm);
+    if (Math.round(queryDuration.asMilliseconds()) > timeout * 1000) {
+      advise = (
+        <Alert bsStyle="warning">
+          This query took {Math.round(queryDuration.asSeconds())} seconds to run,
+          and the explore view times out at {timeout} seconds,
+          following this flow will most likely lead to your query timing out.
+          We recommend your summarize your data further before following that flow.
+          If activated you can use the <strong>CREATE TABLE AS</strong> feature
+          to store a summarized data set that you can then explore.
+        </Alert>);
+    }
+    return advise;
+  }
+  visualize() {
+    this.props.actions.createDatasource(this.buildVizOptions(), this)
       .done(() => {
         const columns = Object.keys(this.state.columns).map(k => this.state.columns[k]);
-        const mainMetric = columns.filter(d => d.agg)[0];
         const mainGroupBy = columns.filter(d => d.is_dim)[0];
         const formData = {
           datasource: this.props.datasource,
@@ -138,14 +160,10 @@ class VisualizeModal extends React.PureComponent {
           since: '100 years ago',
           limit: '0',
         };
-        if (mainMetric) {
-          formData.metrics = [mainMetric.name];
-          formData.metric = mainMetric.name;
-        }
         if (mainGroupBy) {
           formData.groupby = [mainGroupBy.name];
         }
-        notify.info('Creating a data source and popping a new tab');
+        notify.info(t('Creating a data source and popping a new tab'));
 
         window.open(getExploreUrl(formData));
       })
@@ -175,7 +193,7 @@ class VisualizeModal extends React.PureComponent {
         <div className="VisualizeModal">
           <Modal show={this.props.show} onHide={this.props.onHide}>
             <Modal.Body>
-              No results available for this query
+              {t('No results available for this query')}
             </Modal.Body>
           </Modal>
         </div>
@@ -220,16 +238,17 @@ class VisualizeModal extends React.PureComponent {
       <div className="VisualizeModal">
         <Modal show={this.props.show} onHide={this.props.onHide}>
           <Modal.Header closeButton>
-            <Modal.Title>Visualize</Modal.Title>
+            <Modal.Title>{t('Visualize')}</Modal.Title>
           </Modal.Header>
           <Modal.Body>
             {alerts}
+            {this.buildVisualizeAdvise()}
             <div className="row">
               <Col md={6}>
-                Chart Type
+                {t('Chart Type')}
                 <Select
                   name="select-chart-type"
-                  placeholder="[Chart Type]"
+                  placeholder={t('[Chart Type]')}
                   options={CHART_TYPES}
                   value={(this.state.chartType) ? this.state.chartType.value : null}
                   autosize={false}
@@ -237,11 +256,11 @@ class VisualizeModal extends React.PureComponent {
                 />
               </Col>
               <Col md={6}>
-                Datasource Name
+                {t('Datasource Name')}
                 <input
                   type="text"
                   className="form-control input-sm"
-                  placeholder="datasource name"
+                  placeholder={t('datasource name')}
                   onChange={this.changeDatasourceName.bind(this)}
                   value={this.state.datasourceName}
                 />
@@ -258,7 +277,7 @@ class VisualizeModal extends React.PureComponent {
               bsStyle="primary"
               disabled={(this.state.hints.length > 0)}
             >
-              Visualize
+              {t('Visualize')}
             </Button>
           </Modal.Body>
         </Modal>
@@ -274,6 +293,7 @@ function mapStateToProps(state) {
   return {
     datasource: state.datasource,
     errorMessage: state.errorMessage,
+    timeout: state.common ? state.common.SUPERSET_WEBSERVER_TIMEOUT : null,
   };
 }
 

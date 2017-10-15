@@ -4,12 +4,14 @@ import Mustache from 'mustache';
 import vizMap from '../../visualizations/main';
 import { getExploreUrl } from '../explore/exploreUtils';
 import { applyDefaultFormData } from '../explore/stores/store';
+import { t } from '../locales';
 
 const utils = require('./utils');
 
-/* eslint wrap-iife: 0*/
-const px = function () {
+/* eslint wrap-iife: 0 */
+const px = function (state) {
   let slice;
+  const timeout = state.common.conf.SUPERSET_WEBSERVER_TIMEOUT;
   function getParam(name) {
     /* eslint no-useless-escape: 0 */
     const formattedName = name.replace(/[\[]/, '\\[').replace(/[\]]/, '\\]');
@@ -28,7 +30,7 @@ const px = function () {
       }
     }
     $('.favstar')
-    .attr('title', 'Click to favorite/unfavorite')
+    .attr('title', t('Click to favorite/unfavorite'))
     .css('cursor', 'pointer')
     .each(show)
     .each(function () {
@@ -57,11 +59,13 @@ const px = function () {
   }
   const Slice = function (data, datasource, controller) {
     const token = $('#token_' + data.slice_id);
+    const controls = $('#controls_' + data.slice_id);
     const containerId = 'con_' + data.slice_id;
     const selector = '#' + containerId;
     const container = $(selector);
     const sliceId = data.slice_id;
     const formData = applyDefaultFormData(data.form_data);
+    const sliceCell = $(`#${data.slice_id}-cell`);
     slice = {
       data,
       formData,
@@ -79,16 +83,11 @@ const px = function () {
         };
         return Mustache.render(s, context);
       },
-      jsonEndpoint() {
-        return this.endpoint('json');
+      jsonEndpoint(data) {
+        return this.endpoint(data, 'json');
       },
-      endpoint(endpointType = 'json') {
-        const formDataExtra = Object.assign({}, formData);
-        const flts = controller.effectiveExtraFilters(sliceId);
-        if (flts) {
-          formDataExtra.extra_filters = flts;
-        }
-        let endpoint = getExploreUrl(formDataExtra, endpointType, this.force);
+      endpoint(data, endpointType = 'json') {
+        let endpoint = getExploreUrl(data, endpointType, this.force);
         if (endpoint.charAt(0) !== '/') {
           // Known issue for IE <= 11:
           // https://connect.microsoft.com/IE/feedbackdetail/view/1002846/pathname-incorrect-for-out-of-document-elements
@@ -116,6 +115,7 @@ const px = function () {
 
         token.find('img.loading').hide();
         container.fadeTo(0.5, 1);
+        sliceCell.removeClass('slice-cell-highlight');
         container.show();
 
         $('.query-and-save button').removeAttr('disabled');
@@ -123,19 +123,16 @@ const px = function () {
         controller.done(this);
       },
       getErrorMsg(xhr) {
-        if (xhr.statusText === 'timeout') {
-          return 'The request timed out';
-        }
         let msg = '';
         if (!xhr.responseText) {
           const status = xhr.status;
           if (status === 0) {
             // This may happen when the worker in gunicorn times out
             msg += (
-              'The server could not be reached. You may want to ' +
-              'verify your connection and try again.');
+              t('The server could not be reached. You may want to ' +
+              'verify your connection and try again.'));
           } else {
-            msg += 'An unknown error occurred. (Status: ' + status + ')';
+            msg += (t('An unknown error occurred. (Status: %s )', status));
           }
         }
         return msg;
@@ -144,6 +141,7 @@ const px = function () {
         let errorMsg = msg;
         token.find('img.loading').hide();
         container.fadeTo(0.5, 1);
+        sliceCell.removeClass('slice-cell-highlight');
         let errHtml = '';
         let o;
         try {
@@ -158,9 +156,16 @@ const px = function () {
           errHtml += `<div class="alert alert-danger">${errorMsg}</div>`;
         }
         if (xhr) {
-          const extendedMsg = this.getErrorMsg(xhr);
-          if (extendedMsg) {
-            errHtml += `<div class="alert alert-danger">${extendedMsg}</div>`;
+          if (xhr.statusText === 'timeout') {
+            errHtml += (
+              '<div class="alert alert-warning">' +
+              'Query timeout - visualization query are set to time out ' +
+              `at ${timeout} seconds.</div>`);
+          } else {
+            const extendedMsg = this.getErrorMsg(xhr);
+            if (extendedMsg) {
+              errHtml += `<div class="alert alert-danger">${extendedMsg}</div>`;
+            }
           }
         }
         container.html(errHtml);
@@ -174,7 +179,7 @@ const px = function () {
         $(selector + ' div.alert').remove();
       },
       width() {
-        return token.width();
+        return container.width();
       },
       height() {
         let others = 0;
@@ -202,18 +207,28 @@ const px = function () {
         } else {
           this.force = force;
         }
+        const formDataExtra = Object.assign({}, formData);
+        formDataExtra.extra_filters = controller.effectiveExtraFilters(sliceId);
+        controls.find('a.exploreChart').attr('href', getExploreUrl(formDataExtra));
+        controls.find('a.exportCSV').attr('href', getExploreUrl(formDataExtra, 'csv'));
         token.find('img.loading').show();
         container.fadeTo(0.5, 0.25);
+        sliceCell.addClass('slice-cell-highlight');
         container.css('height', this.height());
-        $.getJSON(this.jsonEndpoint(), (queryResponse) => {
-          try {
-            vizMap[formData.viz_type](this, queryResponse);
-            this.done(queryResponse);
-          } catch (e) {
-            this.error('An error occurred while rendering the visualization: ' + e);
-          }
-        }).fail((err) => {
-          this.error(err.responseText, err);
+        $.ajax({
+          url: this.jsonEndpoint(formDataExtra),
+          timeout: timeout * 1000,
+          success: (queryResponse) => {
+            try {
+              vizMap[formData.viz_type](this, queryResponse);
+              this.done(queryResponse);
+            } catch (e) {
+              this.error(t('An error occurred while rendering the visualization: %s', e));
+            }
+          },
+          error: (err) => {
+            this.error(err.responseText, err);
+          },
         });
       },
       resize() {
@@ -243,5 +258,5 @@ const px = function () {
     initFavStars,
     Slice,
   };
-}();
+};
 module.exports = px;
